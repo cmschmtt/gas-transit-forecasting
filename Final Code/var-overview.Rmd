@@ -1,0 +1,142 @@
+---
+title: "final_var"
+output: html_document
+date: "2023-07-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# IMPORTANT: change this filepath if running code on your own machine!
+knitr::opts_knit$set(root.dir = "C:/Users/carys/gatech/mgt6203/Team-104/")
+```
+
+## Vector autoregressive model walkthrough
+
+This RMarkdown file shows a vector autoregressive modeling approach for one city, Chicago. More full analyses are available in the "Code" section of the project repository; this file is intended as a linearly structured overview of one strand of our analysis. (This code is adapted from code found in the "Code" folder.)
+
+Below, we import the necessary libraries and datasets. We'll be looking at data from Chicago, between 2002 and 2022.
+
+```{r}
+# libraries
+library(vars)
+library(tidyverse)
+library(Metrics)
+
+# inflation-adjusted gas prices:
+real_gas_diesel <- read.csv('Data/real-gas-diesel.csv')
+real_gas_diesel$date <- as.Date(real_gas_diesel$date)
+real_gas_diesel <- real_gas_diesel %>%
+  filter(date >= '2002-01-01' & date <= '2022-12-01') %>%
+  dplyr::select(date, Real.Values.gas)
+
+# unlinked passenger trips:
+upt <- read.csv('Data/monthly_upt_sums.csv')
+upt$date <- as.Date(parse_date_time(upt$date, orders = c("m/Y")))
+upt <- upt %>%
+  filter(date >= '2002-01-01' & date <= '2022-12-01')
+
+# chicago only:
+chi <- merge(
+  select(upt, date, Chicago..IL.IN),
+  real_gas_diesel
+) %>% 
+  rename('upt' = 'Chicago..IL.IN')
+```
+
+## Autocorrelation and partial autocorrelation
+
+Autocorrelation and partial autocorrelation plots help us diagnose what order an autoregressive model should take. The higher-variability gas dataset has a more challenging to interpet ACF/PACF, but the UPT ACF/PACF suggests using an order of 1.
+
+```{r}
+# ACF and PACF of gas:
+acf(real_gas_diesel$Real.Values.gas,
+    main = 'Autocorrelation of real gas prices')
+pacf(real_gas_diesel$Real.Values.gas,
+     main = 'Partial autocorrelation of real gas prices')
+
+acf(chi$upt, main = "Autocorrelation of Chicago UPT")
+pacf(chi$upt, main = "Partial autocorrelation of Chicago UPT")
+```
+
+## Modeling
+
+First, below is a seasonal decomposition of the Chicago unlinked passenger trip count. Although these models don't take into account additional variables, this shows us interesting, strong seasonal patterns in Chicago transit use:
+
+```{r}
+plot(decompose(ts(chi$upt, freq = 52)))
+title('\nChicago')
+```
+
+Vector autoregressive models allow us to use multiple observations together, in this case both gasoline price and historical transit use.
+
+```{r}
+# must be scaled due to difference in range
+chi_data <- dplyr::select(chi, upt, Real.Values.gas)
+chi_data <- scale(chi_data)
+
+# train-test split:
+# for 70/30 train-test split
+# in retrospect this was a too-aggressive split -- VAR isn't strong enough at long-distance
+# forecasting for 30% of observations to be in the testing set. we recommend future work 
+TRAIN_IX <- 176
+TEST_IX <- 76
+chi_train <- head(chi_data, TRAIN_IX)
+chi_test <- tail(chi_data, TEST_IX)
+
+# fit initial model
+var_chi <-  VAR(chi_train, p=1, type='both')
+summary(var_chi)
+
+```
+Above we see that, based on the R-squared, the VAR model predicts gasoline prices more accurately than UPT. In the next section, we analyze the mean absolute error on the training and testing sets. Recall that the data has been scaled, so the MAE cannot be interpreted in the original units.
+
+```{r}
+# store training preds, compare to true data.
+chi_train_preds <- as.numeric(var_chi$varresult$upt$fitted.values)
+mae(chi_train_preds, chi_train[2:TRAIN_IX]) # index needed b/c of how VAR predicts
+
+# store testing preds, compare to true data
+chi_test_preds <- predict(var_chi, n.ahead=TEST_IX)
+upt_preds <- data.frame(chi_test_preds$fcst$upt)$fcst
+mae(chi_test[1:TEST_IX], upt_preds)
+```
+As expected, the testing MAE is worse than the training MAE -- but the testing score is _much_ worse. Why? A plot of actual and predicted data is somewhat more informative: we see that the VAR model does not capture the seasonal effects, and it's also incapable of 'updating' itself to the disruptions following COVID-19.
+
+```{r}
+# plotting preds
+train_dates <- head(chi, TRAIN_IX)$date
+train_dates <- train_dates[2:TRAIN_IX]
+
+chi_train_actuals <- head(as.data.frame(chi_data), TRAIN_IX)$upt[2:TRAIN_IX]
+chi_train_actuals_df <- data.frame(train_dates, chi_train_actuals)
+chi_train_preds_df <- data.frame(train_dates[2:TRAIN_IX], chi_train_preds)
+
+test_dates <- tail(chi, TEST_IX)$date
+
+chi_test_actuals <- tail(as.data.frame(chi_data), TEST_IX)$upt
+chi_test_actuals_df <- data.frame(test_dates, chi_test_actuals)
+chi_test_preds_df <- data.frame(test_dates, upt_preds)
+
+# deeply ashamed of this workaround. would love to know a better way to do this.
+# purpose of the white lineplot is to force the x-axis of the plot object to
+# span dates of both training and testing set
+plot(x=chi$date, y=rep(0, 252),
+     main='VAR performance on scaled training data, CHI',
+     xlab='time',
+     ylab='Scaled CHI unlinked passenger trips',
+     col='white'
+)
+# plot training and testing actual and predicted onto above plot:
+lines(chi_train_actuals_df, type='l', col='blue')
+lines(chi_train_preds_df, type='l', col='orange')
+lines(chi_test_actuals_df, type='l', lty=2, col='blue')
+lines(chi_test_preds_df, type='l', lty=2, col='orange')
+# add legend:
+legend(
+  "bottomleft",
+  legend=c("training actual", "training predicted", "testing actual", "testing predicted"),
+  col=c("blue", "orange", "blue", "orange"),
+  lty=c(1,1,2,2)
+)
+
+```
