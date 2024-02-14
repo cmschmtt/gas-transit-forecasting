@@ -1,4 +1,4 @@
-# Team 104: The Effect of US Gas Prices on Alternative Methods of Travel
+# The Effect of US Gas Prices on Alternative Methods of Travel
 
 ## About the project
 
